@@ -1,0 +1,6 @@
+{
+  "name": "AHIM AI",
+  "description": "Asisten Kecerdasan Buatan berkecepatan tinggi dan berakurasi maksimal untuk produk berbasis teks, administrasi guru, pembuatan soal, coding, dan peringkasan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

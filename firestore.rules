@@ -1,0 +1,94 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net default catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // STANDALONE SECURITY PRIMITIVES & HELPERS
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.firebase.sign_in_provider == 'google.com');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // VALIDATION BLUEPRINTS
+    function isValidChatSession(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() <= 500
+          && data.userId is string && data.userId == request.auth.uid
+          && data.createdAt is string && data.createdAt.size() <= 100
+          && data.keys().hasAll(['title', 'userId', 'createdAt'])
+          && data.keys().size() == 3;
+    }
+
+    function isValidChatMessage(data) {
+      return data.role is string && (data.role == 'user' || data.role == 'model')
+          && data.text is string && data.text.size() <= 100000
+          && data.timestamp is string && data.timestamp.size() <= 100
+          && data.userId is string && data.userId == request.auth.uid
+          && data.keys().hasAll(['role', 'text', 'timestamp', 'userId'])
+          && data.keys().size() == 4;
+    }
+
+    // 1. CHAT SESSIONS COLLECTION
+    match /sessions/{sessionId} {
+      // Allow query execution only if scoped to the current user
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+
+      // Single document fetches or operations
+      allow get: if isVerifiedUser() && isValidId(sessionId) && existing().userId == request.auth.uid;
+
+      allow create: if isVerifiedUser() && isValidId(sessionId) && isValidChatSession(incoming());
+
+      allow update: if isVerifiedUser() && isValidId(sessionId) && isValidChatSession(incoming())
+                    && existing().userId == request.auth.uid
+                    && incoming().userId == existing().userId
+                    && incoming().createdAt == existing().createdAt
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['title']);
+
+      allow delete: if isVerifiedUser() && isValidId(sessionId) && existing().userId == request.auth.uid;
+    }
+
+    // 2. CHAT MESSAGES SUBCOLLECTION
+    match /sessions/{sessionId}/messages/{messageId} {
+      // Master Gate: must be a session belonging to this user
+      allow list: if isVerifiedUser()
+                  && get(/databases/$(database)/documents/sessions/$(sessionId)).data.userId == request.auth.uid;
+
+      allow get: if isVerifiedUser() && isValidId(sessionId) && isValidId(messageId)
+                 && get(/databases/$(database)/documents/sessions/$(sessionId)).data.userId == request.auth.uid;
+
+      allow create: if isVerifiedUser() && isValidId(sessionId) && isValidId(messageId)
+                    && get(/databases/$(database)/documents/sessions/$(sessionId)).data.userId == request.auth.uid
+                    && isValidChatMessage(incoming());
+
+      allow update: if isVerifiedUser() && isValidId(sessionId) && isValidId(messageId)
+                    && get(/databases/$(database)/documents/sessions/$(sessionId)).data.userId == request.auth.uid
+                    && isValidChatMessage(incoming())
+                    && incoming().userId == existing().userId
+                    && incoming().timestamp == existing().timestamp
+                    && incoming().role == existing().role
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['text']);
+
+      allow delete: if isVerifiedUser() && isValidId(sessionId) && isValidId(messageId)
+                    && get(/databases/$(database)/documents/sessions/$(sessionId)).data.userId == request.auth.uid;
+    }
+
+  }
+}

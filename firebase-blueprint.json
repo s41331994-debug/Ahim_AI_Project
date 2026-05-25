@@ -1,0 +1,61 @@
+{
+  "entities": {
+    "ChatSession": {
+      "title": "ChatSession",
+      "description": "Represents a conversation session created by an authenticated user",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "The title of the chat conversation session"
+        },
+        "userId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the owner of this session"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The ISO timestamp when the session was created"
+        }
+      },
+      "required": ["title", "userId", "createdAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Represents an individual message in a chat session",
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["user", "model"],
+          "description": "The role of the sender of the message"
+        },
+        "text": {
+          "type": "string",
+          "description": "The content of the message"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp of the message"
+        },
+        "userId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the owner of this message"
+        }
+      },
+      "required": ["role", "text", "timestamp", "userId"]
+    }
+  },
+  "firestore": {
+    "sessions/{sessionId}": {
+      "schema": "ChatSession",
+      "description": "Collection of all chat sessions"
+    },
+    "sessions/{sessionId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Subcollection of messages inside a session"
+    }
+  }
+}
