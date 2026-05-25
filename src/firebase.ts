@@ -10,19 +10,37 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 
 // Initialize Firestore with DatabaseId passed from config (CRITICAL!)
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId);
 
 // Google Auth Provider
 export const googleAuthProvider = new GoogleAuthProvider();
 
+// Configure Workspace Scopes
+googleAuthProvider.addScope("https://www.googleapis.com/auth/documents");
+googleAuthProvider.addScope("https://www.googleapis.com/auth/forms.body");
+googleAuthProvider.addScope("https://www.googleapis.com/auth/meetings.space.created");
+googleAuthProvider.addScope("https://www.googleapis.com/auth/chat.spaces");
+googleAuthProvider.addScope("https://www.googleapis.com/auth/chat.messages");
+
+// In-memory access token cache
+let cachedAccessToken: string | null = null;
+let isSigningIn = false;
+
 // Standard handle Sign-In with Popup (using popups is compliant in development previews)
 export async function signInWithGoogle() {
   try {
+    isSigningIn = true;
     const result = await signInWithPopup(auth, googleAuthProvider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (credential?.accessToken) {
+      cachedAccessToken = credential.accessToken;
+    }
     return result.user;
   } catch (error) {
     console.error("Firebase Sign-In Error: ", error);
     throw error;
+  } finally {
+    isSigningIn = false;
   }
 }
 
@@ -30,10 +48,21 @@ export async function signInWithGoogle() {
 export async function logOut() {
   try {
     await signOut(auth);
+    cachedAccessToken = null;
   } catch (error) {
     console.error("Firebase Sign-Out Error: ", error);
     throw error;
   }
+}
+
+// Access token getter
+export async function getAccessToken(): Promise<string | null> {
+  return cachedAccessToken;
+}
+
+// Access token setter (e.g., if re-authenticating)
+export function setAccessToken(token: string | null) {
+  cachedAccessToken = token;
 }
 
 // Validation function described in SKILL.md to test connection to Firestore on initial boot

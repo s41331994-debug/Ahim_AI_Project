@@ -26,7 +26,9 @@ import {
   CornerDownRight, 
   FileCheck2,
   Share2,
-  Info
+  Info,
+  Video,
+  ExternalLink
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { PRESET_CONFIGS } from "./presets";
@@ -38,7 +40,9 @@ import {
   logOut, 
   testConnection, 
   handleFirestoreError, 
-  OperationType 
+  OperationType,
+  getAccessToken,
+  setAccessToken
 } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { 
@@ -51,6 +55,15 @@ import {
   orderBy, 
   onSnapshot 
 } from "firebase/firestore";
+import {
+  createGoogleDoc,
+  createGoogleFormQuiz,
+  createGoogleMeetSpace,
+  listGoogleChatSpaces,
+  sendChatMessage,
+  createGoogleKeepNote,
+  parseQuestionsFromText
+} from "./workspace";
 
 function PresetIcon({ name, className }: { name: string; className?: string }) {
   switch (name) {
@@ -116,6 +129,15 @@ export default function App() {
   const [successToast, setSuccessToast] = useState<string | null>(null);
   const [previewOutput, setPreviewOutput] = useState<string>("");
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+
+  // Google Workspace Dynamic States
+  const [isWorkspaceLoading, setIsWorkspaceLoading] = useState<boolean>(false);
+  const [workspaceLoadingText, setWorkspaceLoadingText] = useState<string>("");
+  const [chatSpaces, setChatSpaces] = useState<any[]>([]);
+  const [selectedChatSpaceId, setSelectedChatSpaceId] = useState<string>("");
+  const [isChatModalOpen, setIsChatModalOpen] = useState<boolean>(false);
+  const [workspaceMessageText, setWorkspaceMessageText] = useState<string>("");
+  const [workspaceSuccessLink, setWorkspaceSuccessLink] = useState<{ label: string; url: string } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -319,7 +341,16 @@ export default function App() {
     setPresetValues(initialVals);
 
     fetch("/api/health")
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        const contentType = res.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          throw new TypeError("Gagal menerima format JSON dari server.");
+        }
+        return res.json();
+      })
       .then(data => {
         setApiHealth(data);
         if (!data.hasKey) {
@@ -377,6 +408,210 @@ export default function App() {
     } catch (err: any) {
       console.error(err);
       setErrorBanner(`Gagal keluar: ${err.message}`);
+    }
+  };
+
+  // --- GOOGLE WORKSPACE DRIVERS AND WORKFLOWS ---
+  const ensureWorkspaceToken = async (): Promise<string> => {
+    let token = await getAccessToken();
+    if (token) return token;
+
+    // If logged in via persistent Firebase state but have no memory-cached token,
+    // trigger a short re-auth popup to grab the OAuth credentials safely.
+    if (user) {
+      try {
+        setIsWorkspaceLoading(true);
+        setWorkspaceLoadingText("Menghubungkan sesi Google Workspace Anda...");
+        await signInWithGoogle();
+        token = await getAccessToken();
+        if (token) return token;
+      } catch (err: any) {
+         throw new Error("Gagal mengonfirmasi kredensial Google Workspace. Silakan hubungkan kembali akun Google Anda.");
+      } finally {
+        setIsWorkspaceLoading(false);
+      }
+    }
+
+    // Force sign in if offline/completely unauthenticated
+    try {
+      setIsWorkspaceLoading(true);
+      setWorkspaceLoadingText("Meminta persetujuan otorisasi Google Workspace...");
+      await signInWithGoogle();
+      token = await getAccessToken();
+      if (!token) {
+        throw new Error("Izin akses ditolak atau gagal mendapatkan token otorisasi.");
+      }
+      return token;
+    } catch (err: any) {
+      throw new Error(`Otorisasi dibatalkan: ${err.message || err}`);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const handleExportToDocs = async (title: string, content: string) => {
+    const confirmed = window.confirm("Ekspor draf ini ke Google Docs baru di Google Drive Anda?");
+    if (!confirmed) return;
+
+    try {
+      setIsWorkspaceLoading(true);
+      setWorkspaceSuccessLink(null);
+      setWorkspaceLoadingText("Membuat berkas Google Docs baru...");
+      const token = await ensureWorkspaceToken();
+      
+      const docUrl = await createGoogleDoc(token, title, content);
+      showToast("Draf berhasil diekspor ke Google Docs!");
+      setWorkspaceSuccessLink({ label: "Buka Google Doc", url: docUrl });
+    } catch (err: any) {
+      console.error(err);
+      setErrorBanner(`Kesalahan Ekspor Docs: ${err.message || err}`);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const handleExportToForms = async (title: string, content: string) => {
+    const confirmed = window.confirm("Buat kuis interaktif Google Forms baru berdasarkan draf pertanyaan evaluasi ini?");
+    if (!confirmed) return;
+
+    try {
+      setIsWorkspaceLoading(true);
+      setWorkspaceSuccessLink(null);
+      setWorkspaceLoadingText("Memulai pembuatan kuis Google Forms...");
+      const token = await ensureWorkspaceToken();
+      
+      const formUrl = await createGoogleFormQuiz(token, title, content);
+      showToast("Kuis kustom berhasil disusun di Google Forms!");
+      setWorkspaceSuccessLink({ label: "Buka Google Form", url: formUrl });
+    } catch (err: any) {
+      console.error(err);
+      setErrorBanner(`Kesalahan Ekspor Forms: ${err.message || err}`);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const handleCreateMeet = async () => {
+    const confirmed = window.confirm("Jadwalkan ruang pertemuan Google Meet baru untuk konsultasi kelas?");
+    if (!confirmed) return;
+
+    try {
+      setIsWorkspaceLoading(true);
+      setWorkspaceSuccessLink(null);
+      setWorkspaceLoadingText("Menghubungkan server Google Meet...");
+      const token = await ensureWorkspaceToken();
+      
+      const meetUrl = await createGoogleMeetSpace(token);
+      showToast("Berhasil menjadwalkan ruang Google Meet!");
+      setWorkspaceSuccessLink({ label: "Gabung Google Meet", url: meetUrl });
+
+      // Automatically inject Meet space credentials into the chat session!
+      if (activeSessionId) {
+        const initialText = `Saya telah menjadwalkan pertemuan kelas **Google Meet** instan baru:\n\n🎥 **Ruang Kelas Virtual**: [[Gabung Sekarang](${meetUrl})]\n\nTautan ruang Meet di atas sekarang aktif dan siap dibagikan kepada guru pendamping maupun siswa.`;
+        const timestampStr = new Date().toISOString();
+        const msgId = `meet_${Date.now()}`;
+
+        if (user) {
+          await setDoc(doc(db, "sessions", activeSessionId, "messages", msgId), {
+            role: "model",
+            text: initialText,
+            timestamp: timestampStr,
+            userId: user.uid
+          });
+        } else {
+          setSessions(prev => prev.map(s => {
+            if (s.id === activeSessionId) {
+              return {
+                ...s,
+                messages: [...s.messages, { id: msgId, role: "model", text: initialText, timestamp: timestampStr }]
+              };
+            }
+            return s;
+          }));
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      setErrorBanner(`Kesalahan Google Meet: ${err.message || err}`);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const handleOpenChatSelectionModal = async (messageContent: string) => {
+    try {
+      setIsWorkspaceLoading(true);
+      setWorkspaceSuccessLink(null);
+      setWorkspaceLoadingText("Membaca rincian saluran Google Chat Anda...");
+      const token = await ensureWorkspaceToken();
+
+      const spaces = await listGoogleChatSpaces(token);
+      setChatSpaces(spaces);
+      setWorkspaceMessageText(messageContent);
+      if (spaces.length > 0) {
+        setSelectedChatSpaceId(spaces[0].name); // Space name is like "spaces/AAAAAAAA"
+      } else {
+        setSelectedChatSpaceId("");
+      }
+      setIsChatModalOpen(true);
+    } catch (err: any) {
+      console.error(err);
+      setErrorBanner(`Kesalahan Memuat Google Chat Spaces: ${err.message || err}`);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const handlePostToChat = async () => {
+    if (!selectedChatSpaceId) {
+      alert("Harap pilih ruang Google Chat terlebih dahulu!");
+      return;
+    }
+
+    const confirmed = window.confirm("Kirim teks draf/respons ini ke ruang Google Chat terpilih?");
+    if (!confirmed) return;
+
+    try {
+      setIsWorkspaceLoading(true);
+      setWorkspaceLoadingText("Mengirim pesan ke Google Chat...");
+      const token = await ensureWorkspaceToken();
+
+      // Clean up markdown before posting to Google Chat
+      const cleanText = workspaceMessageText.replace(/[#*`_~]/g, "").trim();
+      await sendChatMessage(token, selectedChatSpaceId, cleanText);
+      showToast("Berhasil mengirim draf ke Google Chat!");
+      setIsChatModalOpen(false);
+    } catch (err: any) {
+      console.error(err);
+      setErrorBanner(`Gagal mengirim ke Google Chat: ${err.message || err}`);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const handleExportToKeep = async (title: string, content: string) => {
+    const confirmed = window.confirm("Simpan draf ini sebagai catatan baru di Google Keep Anda?");
+    if (!confirmed) return;
+
+    try {
+      setIsWorkspaceLoading(true);
+      setWorkspaceSuccessLink(null);
+      setWorkspaceLoadingText("Menghubungkan layanan Google Keep...");
+      const token = await ensureWorkspaceToken();
+
+      const result = await createGoogleKeepNote(token, title, content);
+      if (result.isFallback) {
+        showToast("Catatan Keep disimpan di Google Drive!");
+        setWorkspaceSuccessLink({ label: "Lihat Catatan (Drive)", url: `https://drive.google.com/drive/my-drive` });
+      } else {
+        showToast("Draf berhasil disimpan ke Google Keep!");
+        setWorkspaceSuccessLink({ label: "Buka Google Keep", url: "https://keep.google.com" });
+      }
+    } catch (err: any) {
+      console.error(err);
+      setErrorBanner(`Gagal menyimpan catatan: ${err.message || err}`);
+    } finally {
+      setIsWorkspaceLoading(false);
     }
   };
 
@@ -588,6 +823,17 @@ export default function App() {
         })
       });
 
+      const contentType = res.headers.get("content-type");
+      if (!res.ok || !contentType || !contentType.includes("application/json")) {
+        const text = await res.text();
+        console.error("Kesalahan Respons Server:", text);
+        throw new Error(
+          res.status === 404
+            ? "Rute API tidak ditemukan (404). Silakan muat ulang atau tunggu server dev memuat rute backend baru."
+            : `Gagal memproses respons server (${res.status}). Respons bukan merupakan data JSON yang valid.`
+        );
+      }
+
       const data = await res.json();
       setIsGenerating(false);
 
@@ -685,6 +931,17 @@ export default function App() {
           groqApiKey: groqApiKey
         })
       });
+
+      const contentType = res.headers.get("content-type");
+      if (!res.ok || !contentType || !contentType.includes("application/json")) {
+        const text = await res.text();
+        console.error("Kesalahan Respons Server:", text);
+        throw new Error(
+          res.status === 404
+            ? "Rute API tidak ditemukan (404). Silakan muat ulang atau tunggu server dev memuat rute backend baru."
+            : `Gagal memproses respons server (${res.status}). Respons bukan merupakan data JSON yang valid.`
+        );
+      }
 
       const data = await res.json();
       setIsGenerating(false);
@@ -1295,7 +1552,7 @@ export default function App() {
                             </div>
                           </div>
 
-                          <div className={`flex items-center gap-3 text-[10px] text-slate-450 font-mono px-1.5 ${isUser ? "justify-end" : "justify-start"}`}>
+                          <div className={`flex flex-wrap items-center gap-2 text-[10px] text-slate-450 font-mono px-1.5 ${isUser ? "justify-end" : "justify-start"}`}>
                             <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                             <span>•</span>
                             <button
@@ -1306,6 +1563,60 @@ export default function App() {
                             >
                               <Copy className="w-2.5 h-2.5" /> Salin
                             </button>
+
+                            {!isUser && (
+                              <>
+                                <span>•</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleExportToDocs(activeSession?.title || "Sesi Obrolan", msg.text)}
+                                  className="text-slate-450 hover:text-sky-600 font-bold flex items-center gap-1 transition-all cursor-pointer"
+                                  title="Ekspor ke Google Docs"
+                                >
+                                  <FileCheck2 className="w-2.5 h-2.5" /> Docs
+                                </button>
+                                
+                                {parseQuestionsFromText(msg.text).length > 0 && (
+                                  <>
+                                    <span>•</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleExportToForms(`Evaluasi - ${activeSession?.title || "Sesi Obrolan"}`, msg.text)}
+                                      className="text-slate-450 hover:text-purple-600 font-bold flex items-center gap-1 transition-all cursor-pointer"
+                                    >
+                                      <CheckSquare className="w-2.5 h-2.5" /> Forms
+                                    </button>
+                                  </>
+                                )}
+
+                                <span>•</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleExportToKeep(activeSession?.title || "Sesi Obrolan", msg.text)}
+                                  className="text-slate-450 hover:text-amber-500 font-bold flex items-center gap-0.5 transition-all cursor-pointer"
+                                >
+                                  💡 Keep
+                                </button>
+
+                                <span>•</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenChatSelectionModal(msg.text)}
+                                  className="text-slate-450 hover:text-emerald-600 font-bold flex items-center gap-1 transition-all cursor-pointer"
+                                >
+                                  <MessageSquare className="w-0.5 h-2.5" /> Chat
+                                </button>
+
+                                <span>•</span>
+                                <button
+                                  type="button"
+                                  onClick={handleCreateMeet}
+                                  className="text-slate-450 hover:text-pink-500 font-bold flex items-center gap-1 transition-all cursor-pointer"
+                                >
+                                  <Video className="w-2.5 h-2.5" /> Meet
+                                </button>
+                              </>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1598,28 +1909,72 @@ export default function App() {
                     </div>
 
                     {previewOutput && (
-                      <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto justify-end" id="toolbar-actions-bar">
+                      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto overflow-x-auto justify-end" id="toolbar-actions-bar">
                         <button
                           id="btn-copy-preview"
                           type="button"
                           onClick={() => handleCopyToClipboard(previewOutput)}
-                          className="p-1.5 px-3 bg-white hover:bg-slate-50 text-xs text-slate-650 border border-slate-200 rounded-lg flex items-center gap-1.5 cursor-pointer transition-all shadow-sm font-medium"
+                          className="p-1.5 px-2.5 bg-white hover:bg-slate-50 text-xs text-slate-600 border border-slate-200 rounded-lg flex items-center gap-1 cursor-pointer transition-all shadow-sm font-medium"
                           title="Salin hasil penulisan"
                         >
                           <Copy className="w-3.5 h-3.5" />
-                          <span>Salin Hasil</span>
+                          <span>Salin</span>
                         </button>
 
                         <button
                           id="btn-download-preview"
                           type="button"
                           onClick={() => handleDownloadFile(activePreset.id, previewOutput)}
-                          className="p-1.5 px-3 bg-white hover:bg-slate-50 text-xs text-slate-650 border border-slate-200 rounded-lg flex items-center gap-1.5 cursor-pointer transition-all shadow-sm font-medium"
+                          className="p-1.5 px-2.5 bg-white hover:bg-slate-50 text-xs text-slate-600 border border-slate-200 rounded-lg flex items-center gap-1 cursor-pointer transition-all shadow-sm font-medium"
                           title="Unduh file format markdown"
                         >
                           <Download className="w-3.5 h-3.5" />
-                          <span>Unduh Markdown</span>
+                          <span>Unduh MD</span>
                         </button>
+
+                        {/* Google Workspace Toolbar */}
+                        <div className="flex items-center gap-1 bg-slate-100 border border-slate-250 p-0.5 rounded-lg" id="workspace-quick-actions">
+                          <button
+                            type="button"
+                            onClick={() => handleExportToDocs(activePreset.title, previewOutput)}
+                            className="bg-white hover:bg-sky-50 text-sky-700 text-[11px] py-1 px-2 rounded flex items-center gap-1 font-sans font-semibold transition-all shadow-sm cursor-pointer"
+                            title="Ekspor ke Google Docs"
+                          >
+                            <FileCheck2 className="w-3 h-3 text-sky-600" />
+                            <span>Docs</span>
+                          </button>
+
+                          {parseQuestionsFromText(previewOutput).length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => handleExportToForms(activePreset.title, previewOutput)}
+                              className="bg-white hover:bg-purple-50 text-purple-700 text-[11px] py-1 px-2 rounded flex items-center gap-1 font-sans font-semibold transition-all shadow-sm cursor-pointer"
+                              title="Buat kuis kustom di Google Forms"
+                            >
+                              <CheckSquare className="w-3 h-3 text-purple-650" />
+                              <span>Forms</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleExportToKeep(activePreset.title, previewOutput)}
+                            className="bg-white hover:bg-amber-50 text-amber-700 text-[11px] py-1 px-2 rounded flex items-center gap-0.5 font-sans font-semibold transition-all shadow-sm cursor-pointer"
+                            title="Simpan draf ke Google Keep"
+                          >
+                            💡 Keep
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleOpenChatSelectionModal(previewOutput)}
+                            className="bg-white hover:bg-emerald-50 text-emerald-700 text-[11px] py-1 px-2 rounded flex items-center gap-1 font-sans font-semibold transition-all shadow-sm cursor-pointer"
+                            title="Bagikan draf ke Google Chat"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Chat</span>
+                          </button>
+                        </div>
 
                         <button
                           id="btn-pipe-chat"
@@ -1629,7 +1984,7 @@ export default function App() {
                           title="Lanjutkan penulisan draf di Workspace Percakapan"
                         >
                           <ChevronRight className="w-3.5 h-3.5" />
-                          <span>Lanjutkan Di Chat</span>
+                          <span>Mulai Chat</span>
                         </button>
                       </div>
                     )}
@@ -1676,6 +2031,157 @@ export default function App() {
         </main>
 
       </div>
+
+      {/* Google Workspace Global Overlay Loader / Success Panel */}
+      <AnimatePresence>
+        {(isWorkspaceLoading || workspaceSuccessLink) && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 15 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 15 }}
+              className="bg-white border border-slate-200 shadow-xl rounded-2xl p-6 max-w-sm w-full text-center relative pointer-events-auto"
+            >
+              {/* Close Button if we have a success link */}
+              {workspaceSuccessLink && (
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceSuccessLink(null)}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-250 p-1.5 rounded-full cursor-pointer transition-all border border-slate-200"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+
+              {isWorkspaceLoading ? (
+                <div className="space-y-4 py-3">
+                  <div className="w-12 h-12 bg-indigo-50 border border-indigo-100 rounded-full flex items-center justify-center text-indigo-600 mx-auto animate-spin shadow-sm">
+                    <Cpu className="w-6 h-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <h4 className="font-semibold text-slate-900 font-sans text-sm">Menghubungkan Workspace</h4>
+                    <p className="text-xs text-slate-500 font-mono text-center leading-relaxed">
+                      {workspaceLoadingText}
+                    </p>
+                  </div>
+                </div>
+              ) : workspaceSuccessLink ? (
+                <div className="space-y-4 py-2">
+                  <div className="w-12 h-12 bg-emerald-50 border border-emerald-100 rounded-full flex items-center justify-center text-emerald-600 mx-auto animate-bounce shadow-sm">
+                    <Check className="w-6 h-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <h4 className="font-semibold text-slate-900 font-sans text-sm">Layanan Berhasil Disinkronkan</h4>
+                    <p className="text-xs text-slate-500 leading-normal font-sans">
+                      Elemen pembelajaran Anda telah disinkronkan ke Google Workspace.
+                    </p>
+                  </div>
+                  <div className="pt-2 flex flex-col gap-2">
+                    <a
+                      href={workspaceSuccessLink.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full bg-indigo-650 hover:bg-indigo-700 text-white font-semibold text-xs py-2.5 px-4 rounded-xl shadow-md shadow-indigo-600/10 flex items-center justify-center gap-1.5 hover:-translate-y-0.5 transition-all text-center cursor-pointer"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      {workspaceSuccessLink.label}
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => setWorkspaceSuccessLink(null)}
+                      className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs py-2 rounded-xl transition-all cursor-pointer font-semibold border border-slate-200"
+                    >
+                      Selesai
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Google Chat Space Picker Modal */}
+      <AnimatePresence>
+        {isChatModalOpen && (
+          <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4" id="chat-picker-overlay">
+            <div className="bg-white border border-slate-200 shadow-xl rounded-2xl p-6 max-w-md w-full relative">
+              
+              <button
+                type="button"
+                onClick={() => setIsChatModalOpen(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 p-1.5 rounded-full cursor-pointer transition-all border border-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              <div className="mb-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-600 flex items-center justify-center shadow-sm">
+                    <MessageSquare className="w-4 h-4" />
+                  </div>
+                  <h3 className="text-sm font-bold text-slate-900 font-sans">Bagikan Ke Google Chat</h3>
+                </div>
+                <p className="text-xs text-slate-500 font-sans leading-relaxed">
+                  Bagikan draf bahan evaluasi RPP, data KTI, atau draf lainnya secara langsung ke ruang obrolan pendidik Google Chat Anda.
+                </p>
+              </div>
+
+              {chatSpaces.length === 0 ? (
+                <div className="bg-slate-50 border border-slate-200 text-center p-6 rounded-xl space-y-2 mb-4">
+                  <p className="text-xs text-slate-600 font-sans font-medium">
+                    ⚠️ Tidak ditemukan ruang obrolan (Spaces) aktif.
+                  </p>
+                  <p className="text-[11px] text-slate-400 font-sans leading-normal">
+                    Langkah: Silakan buat ruang obrolan atau pastikan Anda tergabung ke dalam Google Chat (Spaces) dengan akun Google Workspace ini.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3 mb-4">
+                  <label className="text-[11px] text-slate-400 uppercase font-mono font-bold tracking-wider">
+                    Pilih Ruang Google Chat (Space)
+                  </label>
+                  <select
+                    value={selectedChatSpaceId}
+                    onChange={(e) => setSelectedChatSpaceId(e.target.value)}
+                    className="w-full text-xs font-sans px-3 py-2.5 text-slate-800 border border-slate-250 rounded-lg outline-none focus:border-indigo-500 cursor-pointer bg-white shadow-sm"
+                  >
+                    {chatSpaces.map((sp) => (
+                      <option key={sp.name} value={sp.name}>
+                        {sp.displayName || `${sp.name.split("/")[1]}`} ({sp.spaceType === "DIRECT_MESSAGE" ? "Direk Pesan" : "Grup Space"})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="flex gap-2.5 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setIsChatModalOpen(false)}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold py-2 px-4 rounded-xl cursor-pointer transition-all border border-slate-200"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePostToChat}
+                  disabled={chatSpaces.length === 0}
+                  className="bg-emerald-650 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-semibold py-2 px-4 rounded-xl flex items-center gap-1 cursor-pointer transition-all shadow-md shadow-emerald-600/10"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Kirim Pesan
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
 
     </div>
   );
